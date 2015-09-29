@@ -17,6 +17,8 @@
 #   HUBOT_GRAFANA_S3_SECRET_ACCESS_KEY - Optional; Secret access key for S3
 #   HUBOT_GRAFANA_S3_PREFIX - Optional; Bucket prefix (useful for shared buckets)
 #   HUBOT_GRAFANA_S3_REGION - Optional; Bucket region (defaults to us-standard)
+#   HUBOT_USE_GRAFANA_IMAGES - true|false, whether to use grafana-images
+#   HUBOT_GRAFANA_IMAGES_HOST - The host where grafana images resides, e.g. 'http://grafana.example.com'
 #
 # Dependencies:
 #   "knox": "^0.9.2"
@@ -41,6 +43,8 @@ module.exports = (robot) ->
   s3_prefix = process.env.HUBOT_GRAFANA_S3_PREFIX
   s3_region = 'us-standard'
   s3_region = process.env.HUBOT_GRAFANA_S3_REGION if process.env.HUBOT_GRAFANA_S3_REGION
+  use_grafana_images = process.env.HUBOT_USE_GRAFANA_IMAGES
+  grafana_images_host = if process.env.HUBOT_GRAFANA_IMAGES_HOST then process.env.HUBOT_GRAFANA_IMAGES_HOST else grafana_host
 
   # Get a specific dashboard with options
   robot.respond /(?:grafana|graph|graf) (?:dash|dashboard|db) ([A-Za-z0-9\-\:_]+)(.*)?/i, (msg) ->
@@ -135,7 +139,9 @@ module.exports = (robot) ->
 
           # Fork here for S3-based upload and non-S3
           if (s3_bucket && s3_access_key && s3_secret_key)
-            fetchAndUpload msg, title, imageUrl, link  
+            s3FetchAndUpload msg, title, imageUrl, link
+          else if (use_grafana_images == "true")
+            customFetchAndUpload msg, title, imageUrl, link
           else
             sendRobotResponse msg, title, imageUrl, link
 
@@ -165,6 +171,19 @@ module.exports = (robot) ->
       response.trim()
 
       msg.send response
+
+  # Show help text
+  robot.respond /(?:grafana|graph|graf) help$/i, (msg) ->
+    response = "grafana usage:\n"
+    response += "  hubot graf list\n"
+    response += "  hubot graf db cm-monitoring-default\n"
+    response += "  hubot graf db cm-monitoring-default:8\n"
+    response += "  hubot graf db cm-monitoring-default:swap\n"
+    response += "  hubot graf db cm-monitoring-default now-12hr\n"
+    response += "  hubot graf db cm-monitoring-default now-24hr now-12hr\n"
+    response += "  hubot graf db cm-monitoring-default:8 now-8d now-1d\n"
+    response += "  hubot graf db cm-monitoring-default:swap server=ncv-dashing now-1w\n"
+    msg.send response
 
   # Handle generic errors
   sendError = (message, msg) ->
@@ -201,13 +220,40 @@ module.exports = (robot) ->
       data = JSON.parse(body)
       return callback(data)
 
+  customFetchAndUpload = (msg, title, url, link) ->
+    requestHeaders = {
+      encoding: "utf8",
+      Authorization: "Bearer #{grafana_api_key}",
+      Accept: "application/json"
+    }
+
+    req_opts = {
+      method: "POST",
+      url: "#{grafana_images_host}/grafana-images",
+      headers: requestHeaders,
+      json: {
+        imageUrl: url
+      }
+    }
+
+    # post to grafana-images
+    request req_opts, (err, res, json) ->
+      robot.logger.debug "grafana-images POST: #{req_opts.url}, content-type[#{res.headers['content-type']}]"
+
+      if res.statusCode == 200
+        sendRobotResponse msg, title, json.pubImg, link
+      else
+        robot.logger.debug res
+        robot.logger.error "Upload Error Code: #{res.statusCode}"
+        msg.send "#{title} - [Access Error] - #{link}"
+
   # Pick a random filename
-  uploadPath = () ->
+  s3UploadPath = () ->
     prefix = s3_prefix || 'grafana'
     "#{prefix}/#{crypto.randomBytes(20).toString('hex')}.png"
 
   # Fetch an image from provided URL, upload it to S3, returning the resulting URL
-  fetchAndUpload = (msg, title, url, link) ->
+  s3FetchAndUpload = (msg, title, url, link) ->
     if grafana_api_key
         requestHeaders =
           encoding: null,
@@ -237,7 +283,7 @@ module.exports = (robot) ->
       'encoding'       : null
     }
 
-    filename = uploadPath()
+    filename = s3UploadPath()
 
     req = client.put(filename, headers)
     req.on 'response', (res) ->
