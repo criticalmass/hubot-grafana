@@ -12,6 +12,7 @@
 # Configuration:
 #   HUBOT_GRAFANA_HOST - Host for your Grafana 2.0 install, e.g. 'http://play.grafana.org'
 #   HUBOT_GRAFANA_API_KEY - API key for a particular user (leave unset if unauthenticated)
+#   HUBOT_GRAFANA_QUERY_TIME_RANGE - Optional; Default time range for queries (defaults to 6h)
 #   HUBOT_GRAFANA_S3_BUCKET - Optional; Name of the S3 bucket to copy the graph into
 #   HUBOT_GRAFANA_S3_ACCESS_KEY_ID - Optional; Access key ID for S3
 #   HUBOT_GRAFANA_S3_SECRET_ACCESS_KEY - Optional; Secret access key for S3
@@ -26,7 +27,9 @@
 #
 # Commands:
 #   hubot graf db <dashboard slug>[:<panel id>][ <template variables>][ <from clause>][ <to clause>] - Show grafana dashboard graphs
-#   hubot graf list - Lists all dashboards available
+#   hubot graf list <tag> - Lists all dashboards available (optional: <tag>)
+#   hubot graf search <keyword> - Search available dashboards by <keyword>
+#   hubot graf help - Display a list of sample commands
 #
 
 crypto  = require 'crypto'
@@ -37,6 +40,7 @@ module.exports = (robot) ->
   # Various configuration options stored in environment variables
   grafana_host = process.env.HUBOT_GRAFANA_HOST
   grafana_api_key = process.env.HUBOT_GRAFANA_API_KEY
+  grafana_query_time_range = process.env.HUBOT_GRAFANA_QUERY_TIME_RANGE or '6h'
   s3_bucket = process.env.HUBOT_GRAFANA_S3_BUCKET
   s3_access_key = process.env.HUBOT_GRAFANA_S3_ACCESS_KEY_ID
   s3_secret_key = process.env.HUBOT_GRAFANA_S3_SECRET_ACCESS_KEY
@@ -51,7 +55,7 @@ module.exports = (robot) ->
     slug = msg.match[1].trim()
     remainder = msg.match[2]
     timespan = {
-      from: 'now-6h'
+      from: "now-#{grafana_query_time_range}"
       to: 'now'
     }
     variables = ''
@@ -114,6 +118,8 @@ module.exports = (robot) ->
       if data.templating.list
         template_map = []
         for template in data.templating.list
+          robot.logger.debug template
+          continue unless template.current
           template_map['$' + template.name] = template.current.text
 
       # Return dashboard rows
@@ -146,36 +152,58 @@ module.exports = (robot) ->
             sendRobotResponse msg, title, imageUrl, link
 
   # Get a list of available dashboards
-  robot.respond /(?:grafana|graph|graf) list$/i, (msg) ->
-    callGrafana 'search', (dashboards) ->
+  robot.respond /(?:grafana|graph|graf) list\s?(.+)?/i, (msg) ->
+    if msg.match[1]
+      tag = msg.match[1].trim()
+      callGrafana "search?tag=#{tag}", (dashboards) ->
+        robot.logger.debug dashboards
+        response = "Dashboards tagged `#{tag}`:\n"
+        sendDashboardList dashboards, response, msg
+    else
+      callGrafana 'search', (dashboards) ->
+        robot.logger.debug dashboards
+        response = "Available dashboards:\n"
+        sendDashboardList dashboards, response, msg
+
+  # Search dashboards
+  robot.respond /(?:grafana|graph|graf) search (.+)/i, (msg) ->
+    query = msg.match[1].trim()
+    robot.logger.debug query
+    callGrafana "search?query=#{query}", (dashboards) ->
       robot.logger.debug dashboards
-      response = "Available dashboards:\n"
+      response = "Dashboards matching `#{query}`:\n"
+      sendDashboardList dashboards, response, msg
 
+  # Send Dashboard list
+  sendDashboardList = (dashboards, response, msg) ->
+    # Handle refactor done for version 2.0.2+
+    if dashboards.dashboards
+      list = dashboards.dashboards
+    else
+      list = dashboards
+
+    robot.logger.debug list
+    unless list.length > 0
+      return
+
+    for dashboard in list
       # Handle refactor done for version 2.0.2+
-      if dashboards.dashboards
-        list = dashboards.dashboards
+      if dashboard.uri
+        slug = dashboard.uri.replace /^db\//, ''
       else
-        list = dashboards
+        slug = dashboard.slug
+      response = response + "- #{slug}: #{dashboard.title}\n"
 
-      robot.logger.debug list
+    # Remove trailing newline
+    response.trim()
 
-      for dashboard in list
-        # Handle refactor done for version 2.0.2+
-        if dashboard.uri
-          slug = dashboard.uri.replace /^db\//, ''
-        else
-          slug = dashboard.slug
-        response = response + "- #{slug}: #{dashboard.title}\n"
-
-      # Remove trailing newline
-      response.trim()
-
-      msg.send response
+    msg.send response
 
   # Show help text
   robot.respond /(?:grafana|graph|graf) help$/i, (msg) ->
     response = "grafana usage:\n"
-    response += "  hubot graf list\n"
+    response += "  hubot graf list internal\n"
+    response += "  hubot graf search mon\n"
     response += "  hubot graf db cm-monitoring-default\n"
     response += "  hubot graf db cm-monitoring-default:8\n"
     response += "  hubot graf db cm-monitoring-default:swap\n"
